@@ -1358,6 +1358,8 @@ fn setup_instance(
                     tpm_dev.attach(&machine.bus_mmio);
                     guard.inventory.register(&tpm_dev);
                     extra_acpi_tables
+                        .extend(tpm::build_acpi_tpm2_ssdt());
+                    extra_acpi_tables
                         .extend(tpm::build_acpi_tpm2_table());
                     slog::info!(
                         log,
