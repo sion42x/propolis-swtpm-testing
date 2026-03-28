@@ -43,7 +43,7 @@ mod snapshot;
 
 const PAGE_OFFSET: u64 = 0xfff;
 // Arbitrary ROM limit for now
-const MAX_ROM_SIZE: usize = 0x20_0000;
+const MAX_ROM_SIZE: usize = 0x40_0000;
 
 const MIN_RT_THREADS: usize = 8;
 const BASE_RT_THREADS: usize = 4;
