@@ -16,6 +16,7 @@ use anyhow::Context;
 use clap::Parser;
 use futures::future::BoxFuture;
 use propolis::hw::qemu::pvpanic::QemuPvpanic;
+use propolis::hw::tpm::{self, TpmCrb, SwtpmBackend};
 use propolis::vsock::GuestCid;
 use propolis_types::{CpuidIdent, CpuidValues, CpuidVendor};
 use slog::{o, Drain};
@@ -778,7 +779,9 @@ fn build_machine(
     .add_mem_region(0, lowmem, "lowmem")?
     .add_rom_region(0x1_0000_0000 - MAX_ROM_SIZE, MAX_ROM_SIZE, "bootrom")?
     .add_mmio_region(0xc000_0000, 0x2000_0000, "dev32")?
-    .add_mmio_region(0xe000_0000, 0x1000_0000, "pcicfg")?;
+    .add_mmio_region(0xe000_0000, 0x1000_0000, "pcicfg")?
+    // TPM CRB: standard TCG address 0xFED40000, 5 localities × 4 KiB
+    .add_mmio_region(0xFED4_0000, 0x5000, "tpm-crb")?;
 
     let highmem_start = 0x1_0000_0000;
     if highmem > 0 {
@@ -1225,6 +1228,11 @@ fn setup_instance(
     debug_out.attach(Arc::clone(&debug_device) as Arc<dyn BlockingSource>);
     guard.inventory.register(&debug_device);
 
+    // Accumulate any extra ACPI tables that device drivers want to expose.
+    // Injected into fw_cfg "etc/acpi/tables" after the loop so that OVMF
+    // appends them to the XSDT.
+    let mut extra_acpi_tables: Vec<u8> = Vec::new();
+
     for (name, dev) in config.devices.iter() {
         let driver = &dev.driver as &str;
         slog::debug!(log, "creating device"; "name" => ?name, "driver" => %driver);
@@ -1334,6 +1342,30 @@ fn setup_instance(
                     guard.inventory.register(&vsock);
                     chipset_pci_attach(bdf, vsock);
                 }
+                tpm::crb::DEVICE_NAME => {
+                    let socket_path = dev
+                        .options
+                        .get("socket_path")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "tpm-crb: missing required option 'socket_path'"
+                            )
+                        })?;
+                    let backend =
+                        Arc::new(SwtpmBackend::new(socket_path));
+                    let tpm_dev = TpmCrb::create(backend);
+                    tpm_dev.attach(&machine.bus_mmio);
+                    guard.inventory.register(&tpm_dev);
+                    extra_acpi_tables
+                        .extend(tpm::build_acpi_tpm2_table());
+                    slog::info!(
+                        log,
+                        "TPM CRB device attached";
+                        "socket" => socket_path,
+                        "mmio_base" => format!("{:#x}", tpm::TPM_CRB_BASE_ADDR),
+                    );
+                }
                 _ => {
                     slog::error!(log, "unrecognized driver {driver}"; "name" => name);
                     return Err(Error::new(
@@ -1424,6 +1456,18 @@ fn setup_instance(
     }
     let e820_entry = generate_e820(machine, log).expect("can build E820 table");
     fwcfg.insert_named("etc/e820", e820_entry).unwrap();
+
+    // Inject any extra ACPI tables (e.g. the TPM2 table) so that OVMF appends
+    // them to the XSDT.  The "etc/acpi/tables" fw_cfg file contains one or
+    // more concatenated ACPI table blobs.
+    if !extra_acpi_tables.is_empty() {
+        fwcfg
+            .insert_named(
+                "etc/acpi/tables",
+                fwcfg::Entry::Bytes(extra_acpi_tables),
+            )
+            .unwrap();
+    }
 
     fwcfg.attach(pio, &machine.acc_mem);
 

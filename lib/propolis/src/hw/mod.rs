@@ -11,5 +11,6 @@ pub mod pci;
 pub mod ps2;
 pub mod qemu;
 pub mod testdev;
+pub mod tpm;
 pub mod uart;
 pub mod virtio;
