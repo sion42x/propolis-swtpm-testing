@@ -42,6 +42,7 @@ const TPM2_ST_NO_SESSIONS: u16 = 0x8001;
 /// TPM_RC_FAILURE.
 const TPM2_RC_FAILURE: u32 = 0x0000_0101;
 
+
 // ── SwtpmBackend ──────────────────────────────────────────────────────────────
 
 /// TPM backend that communicates with a running swtpm process via a Unix
@@ -67,16 +68,22 @@ impl SwtpmBackend {
         let mut guard = self.stream.lock().unwrap();
         match guard.take() {
             Some(s) => Ok(s),
-            None => UnixStream::connect(&self.socket_path),
+            None => {
+                let mut s = UnixStream::connect(&self.socket_path)?;
+                Ok(s)
+            }
         }
     }
 
     /// Send `cmd` to swtpm and return the full response, including header.
     fn send_cmd(&self, cmd: &[u8]) -> io::Result<Vec<u8>> {
+        eprintln!("[swtpm] connecting to {:?}", self.socket_path);
         let mut stream = self.get_or_connect()?;
+        eprintln!("[swtpm] sending {} bytes: {:02x?}", cmd.len(), &cmd[..cmd.len().min(10)]);
 
         stream.write_all(cmd)?;
         stream.flush()?;
+        eprintln!("[swtpm] sent, waiting for response");
 
         // Read the first 6 bytes to learn the total response length.
         let mut header = [0u8; 6];
@@ -100,6 +107,7 @@ impl SwtpmBackend {
             stream.read_exact(&mut response[6..])?;
         }
 
+        eprintln!("[swtpm] response {} bytes: {:02x?}", response.len(), &response[..response.len().min(10)]);
         // Stash the connection for the next command.
         *self.stream.lock().unwrap() = Some(stream);
         Ok(response)

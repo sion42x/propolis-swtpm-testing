@@ -59,15 +59,15 @@ const LOC_STS_GRANTED: u32 = 1 << 0;
 // bits[23:22] InterfaceSelector = 1 (CRB active)
 
 const INTF_ID_LO: u32 =
-    (1 << 0)  // InterfaceType = CRB
-    | (1 << 4)  // InterfaceVersion = 1
-    | (1 << 18) // CapCRB
-    | (1 << 22); // InterfaceSelector = CRB
+    0x1          // InterfaceType = CRB
+    | (1 << 4)   // InterfaceVersion = 1
+    | (1 << 14)  // CapCRB (bit 14)
+    | (1 << 17); // InterfaceSelector = 1 / CRB active (bits[18:17])
 const INTF_ID_HI: u32 = 0; // RID = 0
 
 // ── CTRL_STS bits ─────────────────────────────────────────────────────────────
 //
-// tpmSts  (bit 0): 1 = idle/not-ready, 0 = ready
+// tpmSts  (bit 0): 1 = fatal error (device non-functional), 0 = no error
 // tpmIdle (bit 1): 1 = idle state
 
 const CTRL_STS_NOT_READY: u32 = 1 << 0;
@@ -116,8 +116,8 @@ impl CrbRegs {
             loc_state: LOC_STATE_REG_VALID | LOC_STATE_LOC_ASSIGNED,
             loc_sts: LOC_STS_GRANTED,
             ctrl_req: 0,
-            // Idle state: both tpmIdle and tpmSts set
-            ctrl_sts: CTRL_STS_IDLE | CTRL_STS_NOT_READY,
+            // Idle state: tpmIdle set, tpmSts (fatal error) clear
+            ctrl_sts: CTRL_STS_IDLE,
             ctrl_start: 0,
             int_enable: 0,
             int_sts: 0,
@@ -207,7 +207,7 @@ impl TpmCrb {
 
     fn reg_read(&self, reg: usize) -> u32 {
         let regs = self.regs.lock().unwrap();
-        match reg {
+        let val = match reg {
             REG_LOC_STATE => regs.loc_state,
             REG_LOC_STS => regs.loc_sts,
             REG_INTF_ID_LO => INTF_ID_LO,
@@ -224,10 +224,13 @@ impl TpmCrb {
             REG_CTRL_RSP_ADDR_LO => DATA_BUF_ADDR as u32,
             REG_CTRL_RSP_ADDR_HI => (DATA_BUF_ADDR >> 32) as u32,
             _ => 0,
-        }
+        };
+        eprintln!("[CRB]  read reg={:#05x} val={:#010x}", reg, val);
+        val
     }
 
     fn reg_write(&self, reg: usize, val: u32) {
+        eprintln!("[CRB] write reg={:#05x} val={:#010x}", reg, val);
         let mut regs = self.regs.lock().unwrap();
         match reg {
             REG_LOC_CTRL => {
@@ -242,11 +245,14 @@ impl TpmCrb {
                 if val & CTRL_REQ_CMD_READY != 0 {
                     regs.state = TpmState::Ready;
                     regs.ctrl_sts &= !(CTRL_STS_IDLE | CTRL_STS_NOT_READY);
-                    regs.ctrl_req = CTRL_REQ_CMD_READY;
+                    // TCG spec: hardware clears cmdReady when transition completes.
+                    // Our transition is synchronous, so clear immediately.
+                    regs.ctrl_req = 0;
                 }
                 if val & CTRL_REQ_GO_IDLE != 0 {
                     regs.state = TpmState::Idle;
-                    regs.ctrl_sts = CTRL_STS_IDLE | CTRL_STS_NOT_READY;
+                    regs.ctrl_sts = CTRL_STS_IDLE;
+                    // TCG spec: hardware clears goIdle when transition completes.
                     regs.ctrl_req = 0;
                 }
             }
@@ -273,6 +279,9 @@ impl TpmCrb {
                 };
                 let cmd_len = cmd_size.min(TPM_DATA_BUFFER_SIZE);
                 let cmd: Vec<u8> = regs.data_buf[..cmd_len].to_vec();
+                eprintln!("[CRB] CTRL_START: cmd_size={} cmd_len={} hdr={:02x?}",
+                    cmd_size, cmd_len,
+                    &regs.data_buf[..regs.data_buf.len().min(10)]);
 
                 // Release the lock before blocking on the backend.  The guest
                 // vCPU is suspended during this MMIO exit so there is no
@@ -314,6 +323,9 @@ impl TpmCrb {
                     wo.read_bytes(
                         &mut regs.data_buf[buf_offset..buf_offset + wo.len()],
                     );
+                    eprintln!("[CRB] data_buf write offset={:#x} len={} hdr={:02x?}",
+                        buf_offset, wo.len(),
+                        &regs.data_buf[..regs.data_buf.len().min(10)]);
                 }
             }
         }
