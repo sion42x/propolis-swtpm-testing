@@ -1,7 +1,8 @@
 # vTPM Demo: BitLocker-Encrypted Windows VM on illumos
 
 This guide walks through running a Windows Server 2022 VM with a software TPM
-(swtpm) and BitLocker encryption on an illumos host using `propolis-standalone`.
+(swtpm) and BitLocker encryption on an illumos host using either
+`propolis-server` (recommended) or `propolis-standalone`.
 
 The result: a Windows VM whose disk is BitLocker-encrypted, where the TPM key
 material lives in the swtpm state directory. Lose the state dir → BitLocker
@@ -50,13 +51,17 @@ cd ~/oxide-edk2
 cp Build/OvmfX64/DEBUG_ILLGCC/FV/OVMF_CODE.fd /root/OVMF_CODE.fd
 ```
 
-### propolis-standalone
+### propolis binaries
 
 Build propolis on the illumos host:
 
 ```bash
-cargo build --release -p propolis-standalone
+cargo build --release -p propolis-server -p propolis-standalone
 ```
+
+`propolis-server` is the recommended path — it exposes the full HTTP API and
+accepts VM configuration via `propolis-cli`. `propolis-standalone` is simpler
+for quick iteration but doesn't go through the API layer.
 
 ### Windows Server 2022 disk image
 
@@ -110,16 +115,29 @@ mkdir -p /tmp/mytpm
   --flags not-need-init --daemon
 ```
 
-### 3. Start propolis
+### 3. Start propolis and boot the VM
+
+**Using propolis-server (recommended):**
+
+```bash
+# Terminal 1: start the server
+pfexec /root/propolis/target/release/propolis-server run \
+  /root/OVMF_CODE.fd 0.0.0.0:12400
+
+# Terminal 2: create and run the instance
+./target/release/propolis-cli -s 127.0.0.1 -p 12400 new \
+  --config-toml /root/win2022.toml -c 4 -m 32768 win2022
+./target/release/propolis-cli -s 127.0.0.1 -p 12400 state run
+
+# Connect to serial console
+./target/release/propolis-cli -s 127.0.0.1 -p 12400 serial
+```
+
+**Using propolis-standalone:**
 
 ```bash
 /root/propolis/target/release/propolis-standalone /root/win2022.toml \
   > /tmp/propolis.log 2>&1 &
-```
-
-### 4. Connect to the serial console
-
-```bash
 socat STDIO,raw,echo=0 UNIX-CONNECT:/root/ttya
 ```
 
@@ -201,11 +219,24 @@ The swtpm state directory is the key material. Keep it safe.
 **The swtpm state directory must not be wiped between restarts.**
 `rm -f /tmp/mytpm/*` destroys the SRK and breaks BitLocker.
 
-propolis can reconnect to a running swtpm process — if swtpm is still up, just
-restart propolis:
+propolis can reconnect to a running swtpm process — no need to restart swtpm
+unless its process died. After a clean Windows shutdown:
+
+**propolis-server:**
 
 ```bash
-pkill propolis-standalone
+# propolis-server exits when the guest powers off; just restart it and
+# re-create the instance
+pfexec /root/propolis/target/release/propolis-server run \
+  /root/OVMF_CODE.fd 0.0.0.0:12400 &
+./target/release/propolis-cli -s 127.0.0.1 -p 12400 new \
+  --config-toml /root/win2022.toml -c 4 -m 32768 win2022
+./target/release/propolis-cli -s 127.0.0.1 -p 12400 state run
+```
+
+**propolis-standalone:**
+
+```bash
 /root/propolis/target/release/propolis-standalone /root/win2022.toml \
   > /tmp/propolis.log 2>&1 &
 ```
@@ -218,8 +249,6 @@ pkill swtpm
   --ctrl type=unixio,path=/tmp/mytpm.ctrl \
   --server type=unixio,path=/tmp/mytpm.sock \
   --flags not-need-init --daemon
-/root/propolis/target/release/propolis-standalone /root/win2022.toml \
-  > /tmp/propolis.log 2>&1 &
 ```
 
 Windows should boot straight in — no BitLocker recovery key prompt.
@@ -237,26 +266,25 @@ mkdir /tmp/mytpm
   --ctrl type=unixio,path=/tmp/mytpm.ctrl \
   --server type=unixio,path=/tmp/mytpm.sock \
   --flags not-need-init --daemon
-/root/propolis/target/release/propolis-standalone /root/win2022.toml \
-  > /tmp/propolis.log 2>&1 &
+# start propolis-server and re-create instance (see Normal restart sequence)
 # → BitLocker recovery key screen appears
 
 # Fix it: restore the good state
-pkill propolis-standalone; pkill swtpm
+pkill swtpm
 rm -rf /tmp/mytpm
 mv /tmp/mytpm.good /tmp/mytpm
 /opt/swtpm/bin/swtpm socket --tpm2 --tpmstate dir=/tmp/mytpm \
   --ctrl type=unixio,path=/tmp/mytpm.ctrl \
   --server type=unixio,path=/tmp/mytpm.sock \
   --flags not-need-init --daemon
-/root/propolis/target/release/propolis-standalone /root/win2022.toml \
-  > /tmp/propolis.log 2>&1 &
+# start propolis-server and re-create instance (see Normal restart sequence)
 # → boots normally, no recovery key prompt
 ```
 
 ## Checking TPM activity
 
-propolis logs TPM CRB traffic to its log file. To see TPM command counts:
+propolis logs TPM CRB traffic to stderr. With propolis-standalone redirected to
+a file, or with propolis-server's output captured:
 
 ```bash
 grep -c '\[CRB\]' /tmp/propolis.log

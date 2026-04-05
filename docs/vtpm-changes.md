@@ -39,6 +39,45 @@ socket and forwards raw TPM 2.0 command/response traffic.
 Wired `tpm-crb` as a recognized device driver in the standalone config parser,
 accepting a `socket_path` field pointing at the swtpm data socket.
 
+### `bin/propolis-server/` — TPM wired into the server API path
+
+**`crates/propolis-api-types-versions/src/add_vsock/components/devices.rs`**
+Added `TpmCrb { socket_path: String }` struct.
+
+**`crates/propolis-api-types-versions/src/add_vsock/instance_spec.rs`**
+Added `Component::TpmCrb(TpmCrb)` variant. Like `VirtioSocket`, it is
+extracted before the v3→v2→v1 conversion chain and filtered out of v1
+specs (which predate TPM support).
+
+**`crates/propolis-api-types-versions/src/latest.rs`**
+Re-exports `TpmCrb` from v3, making it available as
+`propolis_client::instance_spec::TpmCrb`.
+
+**`crates/propolis-config-toml/src/spec.rs`**
+Added `"tpm-crb"` match arm so `propolis-cli --config-toml` can parse the
+same TOML format used by propolis-standalone. Reads `socket_path` from the
+device options.
+
+**`bin/propolis-server/src/lib/spec/mod.rs`**
+Added internal `TpmCrb { id, spec }` struct and `tpm_crb: Option<TpmCrb>`
+field to `Spec`. Updated `From<Spec> for InstanceSpec` and
+`TryFrom<InstanceSpec> for Spec` to extract/insert the TPM component around
+the versioned conversion chain.
+
+**`bin/propolis-server/src/lib/spec/builder.rs`**
+Added `TpmCrbInUse` error variant and `add_tpm_crb_device()` method.
+
+**`bin/propolis-server/src/lib/spec/api_spec_v0.rs`**
+Added `tpm_crb: _` to the exhaustive `Spec` destructure (TPM has no v1
+representation).
+
+**`bin/propolis-server/src/lib/initializer.rs`**
+Added `initialize_tpm_crb()`: creates `SwtpmBackend` from the socket path,
+wraps it in `TpmCrb`, and attaches it to the MMIO bus.
+
+**`bin/propolis-server/src/lib/vm/ensure.rs`**
+Calls `initialize_tpm_crb()` during instance initialization, after vsock.
+
 ---
 
 ## oxide-edk2 (OvmfPkg)
