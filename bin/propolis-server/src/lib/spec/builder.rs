@@ -24,7 +24,7 @@ use crate::spec::SerialPortDevice;
 
 use super::{
     Board, BootOrderEntry, BootSettings, Disk, Nic, QemuPvpanic, SerialPort,
-    VirtioSocket,
+    TpmCrb, VirtioSocket,
 };
 
 #[cfg(feature = "failure-injection")]
@@ -53,6 +53,9 @@ pub(crate) enum SpecBuilderError {
 
     #[error("vsock device already specified")]
     VsockInUse,
+
+    #[error("TPM CRB device already specified")]
+    TpmCrbInUse,
 
     #[cfg(feature = "failure-injection")]
     #[error("migration failure injection already enabled")]
@@ -289,6 +292,23 @@ impl SpecBuilder {
         self.component_names.insert(vsock.id.clone());
         self.spec.vsock = Some(vsock);
 
+        Ok(self)
+    }
+
+    pub fn add_tpm_crb_device(
+        &mut self,
+        tpm: TpmCrb,
+    ) -> Result<&Self, SpecBuilderError> {
+        if self.component_names.contains(&tpm.id) {
+            return Err(SpecBuilderError::ComponentNameInUse(tpm.id));
+        }
+
+        if self.spec.tpm_crb.is_some() {
+            return Err(SpecBuilderError::TpmCrbInUse);
+        }
+
+        self.component_names.insert(tpm.id.clone());
+        self.spec.tpm_crb = Some(tpm);
         Ok(self)
     }
 

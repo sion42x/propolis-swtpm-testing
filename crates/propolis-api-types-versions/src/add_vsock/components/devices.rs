@@ -19,3 +19,11 @@ pub struct VirtioSocket {
     /// The PCI path at which to attach this device.
     pub pci_path: PciPath,
 }
+
+/// A TPM 2.0 CRB device backed by a running swtpm instance.
+#[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TpmCrb {
+    /// Path to the swtpm Unix domain socket.
+    pub socket_path: String,
+}

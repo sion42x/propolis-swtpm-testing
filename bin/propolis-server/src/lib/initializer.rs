@@ -47,6 +47,7 @@ use propolis::hw::uart::LpcUart;
 use propolis::hw::{nvme, virtio};
 use propolis::intr_pins;
 use propolis::vmm::{self, Builder, Machine};
+use propolis::hw::tpm::{SwtpmBackend, TpmCrb};
 use propolis::vsock::GuestCid;
 use propolis_api_types::instance::InstanceProperties;
 use propolis_api_types::instance_spec::components::devices::SerialPortNumber;
@@ -518,6 +519,20 @@ impl MachineInitializer<'_> {
             chipset.pci_attach(bdf, device);
         }
 
+        Ok(())
+    }
+
+    pub fn initialize_tpm_crb(&mut self) -> Result<(), MachineInitError> {
+        if let Some(tpm) = &self.spec.tpm_crb {
+            let backend = Arc::new(SwtpmBackend::new(&tpm.spec.socket_path));
+            let device = TpmCrb::create(backend);
+            device.attach(&self.machine.bus_mmio);
+            self.devices.insert(tpm.id.clone(), device);
+            info!(self.log, "TPM CRB device attached";
+                "mmio_base" => format!("{:#x}", propolis::hw::tpm::TPM_CRB_BASE_ADDR),
+                "socket" => &tpm.spec.socket_path,
+            );
+        }
         Ok(())
     }
 

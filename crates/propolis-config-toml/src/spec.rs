@@ -13,7 +13,7 @@ use propolis_client::{
     instance_spec::{
         Component, Cpuid, CpuidVendor, DlpiNetworkBackend, FileStorageBackend,
         MigrationFailureInjector, NvmeDisk, P9fs, PciPath, PciPciBridge,
-        SoftNpuP9, SoftNpuPciPort, SoftNpuPort, SpecKey, VirtioDisk,
+        SoftNpuP9, SoftNpuPciPort, SoftNpuPort, SpecKey, TpmCrb, VirtioDisk,
         VirtioNetworkBackend, VirtioNic, VirtioSocket,
     },
     support::nvme_serial_from_str,
@@ -68,6 +68,9 @@ pub enum TomlToSpecError {
 
     #[error("failed to get guest_cid for vsock device {0:?}")]
     NoVsockGuestCid(String),
+
+    #[error("failed to get socket_path for tpm-crb device {0:?}")]
+    NoTpmSocketPath(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -255,6 +258,16 @@ impl TryFrom<&super::Config> for SpecConfig {
                         &mut spec,
                         device_id,
                         Component::VirtioSocket(parse_vsock_from_config(
+                            device_name,
+                            device,
+                        )?),
+                    )?;
+                }
+                "tpm-crb" => {
+                    spec_component_add(
+                        &mut spec,
+                        device_id,
+                        Component::TpmCrb(parse_tpm_crb_from_config(
                             device_name,
                             device,
                         )?),
@@ -454,6 +467,16 @@ fn parse_vsock_from_config(
         .ok_or_else(|| TomlToSpecError::InvalidPciPath(name.to_owned()))?;
 
     Ok(VirtioSocket { guest_cid, pci_path })
+}
+
+fn parse_tpm_crb_from_config(
+    name: &str,
+    device: &super::Device,
+) -> Result<TpmCrb, TomlToSpecError> {
+    let socket_path = device
+        .get("socket_path")
+        .ok_or_else(|| TomlToSpecError::NoTpmSocketPath(name.to_owned()))?;
+    Ok(TpmCrb { socket_path })
 }
 
 /// Translate a parsed TOML-provided `CpuidEntry` into a `propolis-server`

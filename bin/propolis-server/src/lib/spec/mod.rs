@@ -27,7 +27,7 @@ use propolis_api_types::instance_spec::{
         board::{Chipset, GuestHypervisorInterface, I440Fx},
         devices::{
             NvmeDisk, PciPciBridge, QemuPvpanic as QemuPvpanicDesc,
-            SerialPortNumber, VirtioDisk, VirtioNic,
+            SerialPortNumber, TpmCrb as TpmCrbDesc, VirtioDisk, VirtioNic,
             VirtioSocket as VirtioSocketDesc,
         },
     },
@@ -57,6 +57,7 @@ impl From<Spec> for InstanceSpec {
     fn from(val: Spec) -> Self {
         let smbios = val.smbios_type1_input.clone();
         let vsock = val.vsock.clone();
+        let tpm_crb = val.tpm_crb.clone();
 
         let v1_spec: v1::instance_spec::InstanceSpec = val.into();
         let v2_spec =
@@ -67,6 +68,9 @@ impl From<Spec> for InstanceSpec {
             spec.components
                 .insert(vsock.id, Component::VirtioSocket(vsock.spec));
         }
+        if let Some(tpm) = tpm_crb {
+            spec.components.insert(tpm.id, Component::TpmCrb(tpm.spec));
+        }
         spec
     }
 }
@@ -76,13 +80,23 @@ impl TryFrom<InstanceSpec> for Spec {
     type Error = ApiSpecError;
 
     fn try_from(value: InstanceSpec) -> Result<Self, Self::Error> {
-        // Extract vsock before conversion since it's v3-only and will be
-        // filtered out during the v3→v2→v1 chain.
+        // Extract v3-only components before the v3→v2→v1 conversion chain
+        // filters them out.
         let mut vsock_entry = None;
+        let mut tpm_crb_entry = None;
         for (id, component) in &value.components {
-            if let Component::VirtioSocket(v) = component {
-                vsock_entry = Some(VirtioSocket { id: id.clone(), spec: *v });
-                break;
+            match component {
+                Component::VirtioSocket(v) => {
+                    vsock_entry =
+                        Some(VirtioSocket { id: id.clone(), spec: *v });
+                }
+                Component::TpmCrb(v) => {
+                    tpm_crb_entry = Some(TpmCrb {
+                        id: id.clone(),
+                        spec: v.clone(),
+                    });
+                }
+                _ => {}
             }
         }
 
@@ -93,6 +107,9 @@ impl TryFrom<InstanceSpec> for Spec {
         let mut builder = api_spec_v0::v1_to_spec_builder(v1_spec)?;
         if let Some(vsock) = vsock_entry {
             builder.add_vsock_device(vsock)?;
+        }
+        if let Some(tpm) = tpm_crb_entry {
+            builder.add_tpm_crb_device(tpm)?;
         }
         let mut spec = builder.finish();
         spec.smbios_type1_input = smbios;
@@ -127,6 +144,7 @@ pub(crate) struct Spec {
     pub pvpanic: Option<QemuPvpanic>,
 
     pub vsock: Option<VirtioSocket>,
+    pub tpm_crb: Option<TpmCrb>,
 
     #[cfg(feature = "failure-injection")]
     pub migration_failure: Option<MigrationFailure>,
@@ -366,6 +384,12 @@ pub struct QemuPvpanic {
 pub struct VirtioSocket {
     pub id: SpecKey,
     pub spec: VirtioSocketDesc,
+}
+
+#[derive(Clone, Debug)]
+pub struct TpmCrb {
+    pub id: SpecKey,
+    pub spec: TpmCrbDesc,
 }
 
 #[cfg(feature = "failure-injection")]

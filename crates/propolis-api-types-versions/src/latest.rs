@@ -42,6 +42,7 @@ pub mod components {
         pub use crate::v1::components::devices::VirtioDisk;
         pub use crate::v1::components::devices::VirtioNic;
 
+        pub use crate::v3::components::devices::TpmCrb;
         pub use crate::v3::components::devices::VirtioSocket;
     }
 }
