@@ -42,6 +42,7 @@ TPM_SOCK=/tmp/swtpm.sock
 TPM_STATE=/tmp/swtpm-state
 if [[ -x "$SWTPM" ]]; then
     mkdir -p "$TPM_STATE"
+    export LD_LIBRARY_PATH=/opt/oxide/propolis-server/lib
     "$SWTPM" socket --tpm2 \
         --tpmstate "dir=$TPM_STATE" \
         --ctrl "type=unixio,path=/tmp/swtpm.ctrl" \
