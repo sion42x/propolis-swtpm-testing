@@ -43,12 +43,15 @@ TPM_STATE=/tmp/swtpm-state
 if [[ -x "$SWTPM" ]]; then
     mkdir -p "$TPM_STATE"
     export LD_LIBRARY_PATH=/opt/oxide/propolis-server/lib
-    "$SWTPM" socket --tpm2 \
+    if "$SWTPM" socket --tpm2 \
         --tpmstate "dir=$TPM_STATE" \
         --ctrl "type=unixio,path=/tmp/swtpm.ctrl" \
         --server "type=unixio,path=$TPM_SOCK" \
-        --flags not-need-init --daemon
-    args+=('--tpm-socket' "$TPM_SOCK")
+        --flags not-need-init --daemon; then
+        args+=('--tpm-socket' "$TPM_SOCK")
+    else
+        printf 'WARNING: swtpm failed to start, continuing without TPM\n' >&2
+    fi
 fi
 
 ctrun -l child -o noorphan,regent /opt/oxide/propolis-server/bin/propolis-server "${args[@]}" &
