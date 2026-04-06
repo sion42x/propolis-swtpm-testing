@@ -29,14 +29,21 @@ OVMF firmware provides two ACPI tables that Windows requires:
 
 ### swtpm on illumos
 
-swtpm is available from the OmniOS extra repo. On a helios/OmniOS system:
+swtpm must be built from source on helios/illumos (the OmniOS IPS package does
+not work on helios). Build version 0.10.1 from
+[stefanberger/swtpm](https://github.com/stefanberger/swtpm):
 
 ```bash
-pkg install ooce/security/swtpm
+git clone https://github.com/stefanberger/swtpm /root/swtpm
+cd /root/swtpm
+git checkout v0.10.1   # or the 0.10.1 release commit
+./autogen.sh
+./configure --prefix=/opt/swtpm --with-tss-user=root --with-tss-group=root MAKE=gmake
+gmake -j$(nproc)
+gmake install
 ```
 
-The binary ends up at `/opt/ooce/bin/swtpm` (or wherever your IPS puts it).
-Adjust paths below accordingly. In this runbook we use `/opt/swtpm/bin/swtpm`.
+The binary ends up at `/opt/swtpm/bin/swtpm`.
 
 ### OVMF firmware
 
