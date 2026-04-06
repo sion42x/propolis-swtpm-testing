@@ -105,6 +105,11 @@ enum Args {
         /// Logging level for the server
         #[clap(long, default_value_t = slog::Level::Info, value_parser = parse_log_level)]
         log_level: slog::Level,
+
+        /// Path to swtpm Unix socket; if set, a CRB TPM backed by this socket
+        /// is injected into every instance created by this server (demo use).
+        #[clap(long)]
+        tpm_socket: Option<PathBuf>,
     },
 }
 
@@ -114,6 +119,7 @@ fn run_server(
     config_dropshot: dropshot::ConfigDropshot,
     config_metrics: Option<MetricsEndpointConfig>,
     vnc_addr: Option<SocketAddr>,
+    tpm_socket: Option<PathBuf>,
     log: slog::Logger,
 ) -> anyhow::Result<()> {
     use propolis::api_version;
@@ -147,6 +153,7 @@ fn run_server(
         use_reservoir,
         log.new(slog::o!()),
         config_metrics,
+        tpm_socket,
     );
 
     // Spawn the runtime for handling API processing
@@ -301,6 +308,7 @@ fn main() -> anyhow::Result<()> {
             metric_addr,
             vnc_addr,
             log_level,
+            tpm_socket,
         } => {
             // Dropshot configuration.
             let config_dropshot = ConfigDropshot {
@@ -324,6 +332,7 @@ fn main() -> anyhow::Result<()> {
                 config_dropshot,
                 metric_config,
                 vnc_addr,
+                tpm_socket,
                 log,
             )
         }

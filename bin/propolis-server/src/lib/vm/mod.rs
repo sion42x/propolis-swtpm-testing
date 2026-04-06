@@ -309,6 +309,10 @@ pub(super) struct EnsureOptions {
     /// The address of this Propolis process, used by the live migration
     /// protocol to transfer serial console connections.
     pub(super) local_server_addr: SocketAddr,
+
+    /// If set, inject a CRB TPM backed by this swtpm socket path into every
+    /// instance, regardless of what the instance spec says. Demo/sled use only.
+    pub(super) tpm_socket: Option<std::path::PathBuf>,
 }
 
 impl Vm {

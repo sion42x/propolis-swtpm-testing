@@ -95,6 +95,10 @@ pub struct StaticConfig {
     /// The configuration to use when setting up this server's Oximeter
     /// endpoint.
     metrics: Option<MetricsEndpointConfig>,
+
+    /// If set, inject a CRB TPM backed by this swtpm socket into every
+    /// instance created by this server (demo/sled use; bypasses instance spec).
+    tpm_socket: Option<PathBuf>,
 }
 
 /// Context accessible from HTTP callbacks.
@@ -113,6 +117,7 @@ impl DropshotEndpointContext {
         use_reservoir: bool,
         log: slog::Logger,
         metric_config: Option<MetricsEndpointConfig>,
+        tpm_socket: Option<PathBuf>,
     ) -> Self {
         let vnc_server = VncServer::new(log.clone());
         Self {
@@ -121,6 +126,7 @@ impl DropshotEndpointContext {
                 bootrom_version,
                 use_reservoir,
                 metrics: metric_config,
+                tpm_socket,
             },
             vnc_server,
             vm: crate::vm::Vm::new(&log),
@@ -245,6 +251,7 @@ impl PropolisServerApi for PropolisServerImpl {
             nexus_client,
             vnc_server: server_context.vnc_server.clone(),
             local_server_addr: rqctx.server.local_addr,
+            tpm_socket: server_context.static_config.tpm_socket.clone(),
         };
 
         let vm_init = match init {

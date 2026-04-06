@@ -564,7 +564,7 @@ async fn initialize_vm_objects(
     ))?;
     init.initialize_network_devices(&chipset).await?;
     init.initialize_vsock(&chipset)?;
-    init.initialize_tpm_crb()?;
+    init.initialize_tpm_crb(options.tpm_socket.as_deref())?;
 
     #[cfg(feature = "failure-injection")]
     init.initialize_test_devices();

@@ -522,17 +522,32 @@ impl MachineInitializer<'_> {
         Ok(())
     }
 
-    pub fn initialize_tpm_crb(&mut self) -> Result<(), MachineInitError> {
-        if let Some(tpm) = &self.spec.tpm_crb {
-            let backend = Arc::new(SwtpmBackend::new(&tpm.spec.socket_path));
-            let device = TpmCrb::create(backend);
-            device.attach(&self.machine.bus_mmio);
-            self.devices.insert(tpm.id.clone(), device);
-            info!(self.log, "TPM CRB device attached";
-                "mmio_base" => format!("{:#x}", propolis::hw::tpm::TPM_CRB_BASE_ADDR),
-                "socket" => &tpm.spec.socket_path,
-            );
-        }
+    pub fn initialize_tpm_crb(
+        &mut self,
+        fallback_socket: Option<&std::path::Path>,
+    ) -> Result<(), MachineInitError> {
+        // Prefer an explicit TpmCrb in the instance spec; fall back to the
+        // server-level --tpm-socket flag (used on sleds where the control
+        // plane doesn't yet pass TPM config in the instance spec).
+        let (id, socket_path) = if let Some(tpm) = &self.spec.tpm_crb {
+            (tpm.id.clone(), tpm.spec.socket_path.clone())
+        } else if let Some(path) = fallback_socket {
+            (
+                SpecKey::Name("tpm0".to_string()),
+                path.to_string_lossy().into_owned(),
+            )
+        } else {
+            return Ok(());
+        };
+
+        let backend = Arc::new(SwtpmBackend::new(&socket_path));
+        let device = TpmCrb::create(backend);
+        device.attach(&self.machine.bus_mmio);
+        self.devices.insert(id, device);
+        info!(self.log, "TPM CRB device attached";
+            "mmio_base" => format!("{:#x}", propolis::hw::tpm::TPM_CRB_BASE_ADDR),
+            "socket" => &socket_path,
+        );
         Ok(())
     }
 
