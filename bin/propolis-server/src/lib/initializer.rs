@@ -661,6 +661,12 @@ impl MachineInitializer<'_> {
         self.restore_tpm_state_from_crucible(&crucible_backend, &state_dir)
             .await?;
 
+        // Ensure the state directory exists (required by swtpm even on first
+        // boot when there is no prior state to restore).
+        std::fs::create_dir_all(&state_dir).with_context(|| {
+            format!("failed to create TPM state dir {TPM_STATE_DIR}")
+        })?;
+
         // Remove stale sockets so swtpm can re-bind.
         let _ = std::fs::remove_file(TPM_SOCK);
         let _ = std::fs::remove_file(TPM_CTRL);
