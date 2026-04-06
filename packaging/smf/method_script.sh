@@ -35,23 +35,13 @@ args=(
   '--metric-addr' "$METRIC_ADDR"
 )
 
-# If a swtpm binary is bundled, start it and inject a CRB TPM into every
-# instance this server creates (demo/prototype use only).
+# If a swtpm binary is bundled, pass it to propolis-server so it can manage
+# swtpm as a child process (required for TpmStateDisk persistence).
+# propolis-server handles spawning, state restore, and shutdown save.
 SWTPM=/opt/oxide/propolis-server/bin/swtpm
-TPM_SOCK=/tmp/swtpm.sock
-TPM_STATE=/tmp/swtpm-state
 if [[ -x "$SWTPM" ]]; then
-    mkdir -p "$TPM_STATE"
     export LD_LIBRARY_PATH=/opt/oxide/propolis-server/lib
-    if "$SWTPM" socket --tpm2 \
-        --tpmstate "dir=$TPM_STATE" \
-        --ctrl "type=unixio,path=/tmp/swtpm.ctrl" \
-        --server "type=unixio,path=$TPM_SOCK" \
-        --flags not-need-init --daemon; then
-        args+=('--tpm-socket' "$TPM_SOCK")
-    else
-        printf 'WARNING: swtpm failed to start, continuing without TPM\n' >&2
-    fi
+    args+=('--swtpm-binary' "$SWTPM")
 fi
 
 ctrun -l child -o noorphan,regent /opt/oxide/propolis-server/bin/propolis-server "${args[@]}" &

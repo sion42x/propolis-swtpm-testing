@@ -24,7 +24,7 @@ use crate::spec::SerialPortDevice;
 
 use super::{
     Board, BootOrderEntry, BootSettings, Disk, Nic, QemuPvpanic, SerialPort,
-    TpmCrb, VirtioSocket,
+    TpmCrb, TpmStateDisk, VirtioSocket,
 };
 
 #[cfg(feature = "failure-injection")]
@@ -56,6 +56,9 @@ pub(crate) enum SpecBuilderError {
 
     #[error("TPM CRB device already specified")]
     TpmCrbInUse,
+
+    #[error("TPM state disk already specified")]
+    TpmStateDiskInUse,
 
     #[cfg(feature = "failure-injection")]
     #[error("migration failure injection already enabled")]
@@ -309,6 +312,23 @@ impl SpecBuilder {
 
         self.component_names.insert(tpm.id.clone());
         self.spec.tpm_crb = Some(tpm);
+        Ok(self)
+    }
+
+    pub fn add_tpm_state_disk(
+        &mut self,
+        tsd: TpmStateDisk,
+    ) -> Result<&Self, SpecBuilderError> {
+        if self.component_names.contains(&tsd.id) {
+            return Err(SpecBuilderError::ComponentNameInUse(tsd.id));
+        }
+
+        if self.spec.tpm_state_disk.is_some() {
+            return Err(SpecBuilderError::TpmStateDiskInUse);
+        }
+
+        self.component_names.insert(tsd.id.clone());
+        self.spec.tpm_state_disk = Some(tsd);
         Ok(self)
     }
 

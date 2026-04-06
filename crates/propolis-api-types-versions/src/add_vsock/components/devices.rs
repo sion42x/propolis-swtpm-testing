@@ -27,3 +27,26 @@ pub struct TpmCrb {
     /// Path to the swtpm Unix domain socket.
     pub socket_path: String,
 }
+
+/// A Crucible-backed volume used to persist swtpm state across VM restarts.
+///
+/// The volume is accessed directly by propolis (not presented to the guest).
+/// On startup, propolis restores swtpm state from this volume into a tmpfs
+/// directory, then starts swtpm pointing at that directory. On shutdown,
+/// propolis checkpoints the state back to the volume.
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TpmStateDisk {
+    /// A serialized `crucible_client_types::VolumeConstructionRequest` for the
+    /// TPM state volume. Stored in serialized form for the same reason as
+    /// `CrucibleStorageBackend::request_json`.
+    pub request_json: String,
+}
+
+impl std::fmt::Debug for TpmStateDisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TpmStateDisk")
+            .field("request_json", &"<redacted>")
+            .finish()
+    }
+}

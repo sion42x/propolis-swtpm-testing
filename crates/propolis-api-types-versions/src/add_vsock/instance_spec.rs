@@ -17,6 +17,7 @@ use crate::v2;
 use crate::v2::instance_spec::SmbiosType1Input;
 
 pub use super::components::devices::TpmCrb;
+pub use super::components::devices::TpmStateDisk;
 pub use super::components::devices::VirtioSocket;
 
 #[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]
@@ -36,6 +37,7 @@ pub enum Component {
     BootSettings(v1_devices::BootSettings),
     VirtioSocket(VirtioSocket),
     TpmCrb(TpmCrb),
+    TpmStateDisk(TpmStateDisk),
     SoftNpuPciPort(v1_devices::SoftNpuPciPort),
     SoftNpuPort(v1_devices::SoftNpuPort),
     SoftNpuP9(v1_devices::SoftNpuP9),
@@ -89,6 +91,9 @@ impl TryFrom<Component> for V1Component {
                 return Err(InvalidV1Component(component))
             }
             component @ Component::TpmCrb(_) => {
+                return Err(InvalidV1Component(component))
+            }
+            component @ Component::TpmStateDisk(_) => {
                 return Err(InvalidV1Component(component))
             }
             Component::SoftNpuPciPort(c) => V1Component::SoftNpuPciPort(c),

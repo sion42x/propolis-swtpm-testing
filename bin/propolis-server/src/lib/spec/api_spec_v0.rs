@@ -81,6 +81,10 @@ impl From<Spec> for v1::instance_spec::InstanceSpec {
             // Not part of `v1::instance_spec::InstanceSpec`. Added in
             // `InstanceSpec` in API Version 3.0.0 (demo: tpm-crb-prototype).
             tpm_crb: _,
+
+            // Not part of `v1::instance_spec::InstanceSpec`. Added in
+            // `InstanceSpec` in API Version 3.0.0 (demo: tpm-crb-prototype).
+            tpm_state_disk: _,
         } = val;
 
         // Inserts a component entry into the supplied map, asserting first that

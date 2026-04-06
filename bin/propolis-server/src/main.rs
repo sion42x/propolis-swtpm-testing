@@ -110,6 +110,12 @@ enum Args {
         /// is injected into every instance created by this server (demo use).
         #[clap(long)]
         tpm_socket: Option<PathBuf>,
+
+        /// Path to the swtpm binary. When set, propolis-server manages swtpm
+        /// as a child process (instead of connecting to an externally-started
+        /// swtpm). Required for TPM state-disk persistence (demo use).
+        #[clap(long)]
+        swtpm_binary: Option<PathBuf>,
     },
 }
 
@@ -120,6 +126,7 @@ fn run_server(
     config_metrics: Option<MetricsEndpointConfig>,
     vnc_addr: Option<SocketAddr>,
     tpm_socket: Option<PathBuf>,
+    swtpm_binary: Option<PathBuf>,
     log: slog::Logger,
 ) -> anyhow::Result<()> {
     use propolis::api_version;
@@ -154,6 +161,7 @@ fn run_server(
         log.new(slog::o!()),
         config_metrics,
         tpm_socket,
+        swtpm_binary,
     );
 
     // Spawn the runtime for handling API processing
@@ -309,6 +317,7 @@ fn main() -> anyhow::Result<()> {
             vnc_addr,
             log_level,
             tpm_socket,
+            swtpm_binary,
         } => {
             // Dropshot configuration.
             let config_dropshot = ConfigDropshot {
@@ -333,6 +342,7 @@ fn main() -> anyhow::Result<()> {
                 metric_config,
                 vnc_addr,
                 tpm_socket,
+                swtpm_binary,
                 log,
             )
         }

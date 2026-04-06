@@ -21,7 +21,12 @@ use propolis_api_types::instance_spec::SpecKey;
 use slog::info;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::{serial::Serial, spec::Spec, vcpu_tasks::VcpuTaskController};
+use crate::{
+    initializer::TpmStatePersister,
+    serial::Serial,
+    spec::Spec,
+    vcpu_tasks::VcpuTaskController,
+};
 
 use super::{BlockBackendMap, CrucibleBackendMap, DeviceMap};
 
@@ -51,6 +56,8 @@ pub(super) struct InputVmObjects {
     pub com1: Arc<Serial<LpcUart>>,
     pub framebuffer: Option<Arc<RamFb>>,
     pub ps2ctrl: Arc<PS2Ctrl>,
+    /// If present, swtpm state will be saved to Crucible when the VM halts.
+    pub tpm_state: Option<TpmStatePersister>,
 }
 
 /// The collection of objects and state that make up a Propolis instance.
@@ -86,6 +93,9 @@ pub(crate) struct VmObjectsLocked {
 
     /// A handle to the VM's PS/2 controller.
     ps2ctrl: Arc<PS2Ctrl>,
+
+    /// If present, saves swtpm state to a Crucible volume when the VM halts.
+    tpm_state: Option<TpmStatePersister>,
 }
 
 impl VmObjects {
@@ -126,6 +136,7 @@ impl VmObjectsLocked {
             com1: input.com1,
             framebuffer: input.framebuffer,
             ps2ctrl: input.ps2ctrl,
+            tpm_state: input.tpm_state,
         }
     }
 
@@ -385,6 +396,14 @@ impl VmObjectsLocked {
             info!(self.log, "stopping and detaching block backend {}", id);
             backend.stop().await;
             backend.attachment().detach();
+        }
+
+        // If we're managing swtpm state persistence, save it to Crucible now.
+        // This runs after block backends stop so there's no interference with
+        // the normal Crucible connection pool.
+        if let Some(ref tpm_state) = self.tpm_state {
+            info!(self.log, "saving TPM state to Crucible");
+            tpm_state.save().await;
         }
     }
 

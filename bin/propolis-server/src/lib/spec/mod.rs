@@ -27,7 +27,8 @@ use propolis_api_types::instance_spec::{
         board::{Chipset, GuestHypervisorInterface, I440Fx},
         devices::{
             NvmeDisk, PciPciBridge, QemuPvpanic as QemuPvpanicDesc,
-            SerialPortNumber, TpmCrb as TpmCrbDesc, VirtioDisk, VirtioNic,
+            SerialPortNumber, TpmCrb as TpmCrbDesc,
+            TpmStateDisk as TpmStateDiskDesc, VirtioDisk, VirtioNic,
             VirtioSocket as VirtioSocketDesc,
         },
     },
@@ -58,6 +59,7 @@ impl From<Spec> for InstanceSpec {
         let smbios = val.smbios_type1_input.clone();
         let vsock = val.vsock.clone();
         let tpm_crb = val.tpm_crb.clone();
+        let tpm_state_disk = val.tpm_state_disk.clone();
 
         let v1_spec: v1::instance_spec::InstanceSpec = val.into();
         let v2_spec =
@@ -70,6 +72,10 @@ impl From<Spec> for InstanceSpec {
         }
         if let Some(tpm) = tpm_crb {
             spec.components.insert(tpm.id, Component::TpmCrb(tpm.spec));
+        }
+        if let Some(tsd) = tpm_state_disk {
+            spec.components
+                .insert(tsd.id, Component::TpmStateDisk(tsd.spec));
         }
         spec
     }
@@ -84,6 +90,7 @@ impl TryFrom<InstanceSpec> for Spec {
         // filters them out.
         let mut vsock_entry = None;
         let mut tpm_crb_entry = None;
+        let mut tpm_state_disk_entry = None;
         for (id, component) in &value.components {
             match component {
                 Component::VirtioSocket(v) => {
@@ -92,6 +99,12 @@ impl TryFrom<InstanceSpec> for Spec {
                 }
                 Component::TpmCrb(v) => {
                     tpm_crb_entry = Some(TpmCrb {
+                        id: id.clone(),
+                        spec: v.clone(),
+                    });
+                }
+                Component::TpmStateDisk(v) => {
+                    tpm_state_disk_entry = Some(TpmStateDisk {
                         id: id.clone(),
                         spec: v.clone(),
                     });
@@ -110,6 +123,9 @@ impl TryFrom<InstanceSpec> for Spec {
         }
         if let Some(tpm) = tpm_crb_entry {
             builder.add_tpm_crb_device(tpm)?;
+        }
+        if let Some(tsd) = tpm_state_disk_entry {
+            builder.add_tpm_state_disk(tsd)?;
         }
         let mut spec = builder.finish();
         spec.smbios_type1_input = smbios;
@@ -145,6 +161,7 @@ pub(crate) struct Spec {
 
     pub vsock: Option<VirtioSocket>,
     pub tpm_crb: Option<TpmCrb>,
+    pub tpm_state_disk: Option<TpmStateDisk>,
 
     #[cfg(feature = "failure-injection")]
     pub migration_failure: Option<MigrationFailure>,
@@ -390,6 +407,12 @@ pub struct VirtioSocket {
 pub struct TpmCrb {
     pub id: SpecKey,
     pub spec: TpmCrbDesc,
+}
+
+#[derive(Clone, Debug)]
+pub struct TpmStateDisk {
+    pub id: SpecKey,
+    pub spec: TpmStateDiskDesc,
 }
 
 #[cfg(feature = "failure-injection")]

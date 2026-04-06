@@ -99,6 +99,11 @@ pub struct StaticConfig {
     /// If set, inject a CRB TPM backed by this swtpm socket into every
     /// instance created by this server (demo/sled use; bypasses instance spec).
     tpm_socket: Option<PathBuf>,
+
+    /// If set, propolis-server spawns swtpm from this binary path instead of
+    /// connecting to an externally-started swtpm. Required for TpmStateDisk
+    /// persistence (demo use).
+    swtpm_binary: Option<PathBuf>,
 }
 
 /// Context accessible from HTTP callbacks.
@@ -118,6 +123,7 @@ impl DropshotEndpointContext {
         log: slog::Logger,
         metric_config: Option<MetricsEndpointConfig>,
         tpm_socket: Option<PathBuf>,
+        swtpm_binary: Option<PathBuf>,
     ) -> Self {
         let vnc_server = VncServer::new(log.clone());
         Self {
@@ -127,6 +133,7 @@ impl DropshotEndpointContext {
                 use_reservoir,
                 metrics: metric_config,
                 tpm_socket,
+                swtpm_binary,
             },
             vnc_server,
             vm: crate::vm::Vm::new(&log),
@@ -252,6 +259,7 @@ impl PropolisServerApi for PropolisServerImpl {
             vnc_server: server_context.vnc_server.clone(),
             local_server_addr: rqctx.server.local_addr,
             tpm_socket: server_context.static_config.tpm_socket.clone(),
+            swtpm_binary: server_context.static_config.swtpm_binary.clone(),
         };
 
         let vm_init = match init {

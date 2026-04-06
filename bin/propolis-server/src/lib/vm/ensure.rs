@@ -564,7 +564,12 @@ async fn initialize_vm_objects(
     ))?;
     init.initialize_network_devices(&chipset).await?;
     init.initialize_vsock(&chipset)?;
-    init.initialize_tpm_crb(options.tpm_socket.as_deref())?;
+    let tpm_state = init
+        .initialize_tpm_crb(
+            options.tpm_socket.as_deref(),
+            options.swtpm_binary.as_deref(),
+        )
+        .await?;
 
     #[cfg(feature = "failure-injection")]
     init.initialize_test_devices();
@@ -643,6 +648,7 @@ async fn initialize_vm_objects(
         com1,
         framebuffer: Some(ramfb),
         ps2ctrl,
+        tpm_state,
     };
 
     // Another really terrible hack. As we've found in Propolis#1008, brk()

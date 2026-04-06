@@ -111,6 +111,71 @@ pub enum MachineInitError {
     SoftNpuP9Missing,
 }
 
+/// Holds the resources needed to save swtpm state to a Crucible volume when
+/// the VM halts. Kept alive in VmObjects for the duration of the VM's life.
+pub(crate) struct TpmStatePersister {
+    /// Crucible backend opened for the TPM state disk.
+    pub backend: Arc<block::CrucibleBackend>,
+    /// Directory where swtpm writes its state files.
+    pub state_dir: std::path::PathBuf,
+    /// The spawned swtpm child process.
+    pub child: tokio::sync::Mutex<tokio::process::Child>,
+    pub log: slog::Logger,
+}
+
+impl TpmStatePersister {
+    /// Magic bytes written at the front of the Crucible state blob.
+    const MAGIC: &'static [u8; 8] = b"TPMST\x00\x01\x00";
+    /// Name of the swtpm persistent-all state file.
+    const PERMALL_FILE: &'static str = "tpm2-00.permall";
+
+    /// Kill the swtpm child process, read the permall file from the state
+    /// directory, and write it (with a header) to the Crucible volume.
+    pub async fn save(&self) {
+        // Send SIGKILL to swtpm. swtpm flushes permall on every TPM command
+        // completion, so the file is already current.
+        let _ = self.child.lock().await.kill().await;
+
+        // Brief pause to let any in-flight filesystem writes settle.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let permall_path = self.state_dir.join(Self::PERMALL_FILE);
+        let state_data = match tokio::fs::read(&permall_path).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                slog::info!(self.log, "TPM permall not found, nothing to save");
+                return;
+            }
+            Err(e) => {
+                slog::error!(self.log, "Failed to read TPM permall: {}", e);
+                return;
+            }
+        };
+
+        // Format: MAGIC (8) | len as u64-LE (8) | permall bytes
+        let mut payload =
+            Vec::with_capacity(16 + state_data.len());
+        payload.extend_from_slice(Self::MAGIC);
+        payload.extend_from_slice(
+            &(state_data.len() as u64).to_le_bytes(),
+        );
+        payload.extend_from_slice(&state_data);
+
+        match self.backend.write_raw(&payload).await {
+            Ok(()) => slog::info!(
+                self.log,
+                "Saved {} bytes of TPM state to Crucible",
+                state_data.len()
+            ),
+            Err(e) => slog::error!(
+                self.log,
+                "Failed to write TPM state to Crucible: {}",
+                e
+            ),
+        }
+    }
+}
+
 /// Arbitrary ROM limit for now
 const MAX_ROM_SIZE: usize = 0x20_0000;
 
@@ -522,10 +587,24 @@ impl MachineInitializer<'_> {
         Ok(())
     }
 
-    pub fn initialize_tpm_crb(
+    pub async fn initialize_tpm_crb(
         &mut self,
         fallback_socket: Option<&std::path::Path>,
-    ) -> Result<(), MachineInitError> {
+        swtpm_binary: Option<&std::path::Path>,
+    ) -> Result<Option<TpmStatePersister>, MachineInitError> {
+        // If the spec includes a TpmStateDisk and we have a swtpm binary,
+        // use the new managed path: restore state from Crucible, spawn swtpm,
+        // and return a persister for saving state on halt.
+        if let (Some(state_disk), Some(swtpm_bin)) =
+            (&self.spec.tpm_state_disk, swtpm_binary)
+        {
+            return self
+                .initialize_tpm_with_state_disk(state_disk, swtpm_bin)
+                .await
+                .map(Some);
+        }
+
+        // Legacy path: connect to an externally-started swtpm.
         // Prefer an explicit TpmCrb in the instance spec; fall back to the
         // server-level --tpm-socket flag (used on sleds where the control
         // plane doesn't yet pass TPM config in the instance spec).
@@ -537,7 +616,7 @@ impl MachineInitializer<'_> {
                 path.to_string_lossy().into_owned(),
             )
         } else {
-            return Ok(());
+            return Ok(None);
         };
 
         let backend = Arc::new(SwtpmBackend::new(&socket_path));
@@ -547,6 +626,147 @@ impl MachineInitializer<'_> {
         info!(self.log, "TPM CRB device attached";
             "mmio_base" => format!("{:#x}", propolis::hw::tpm::TPM_CRB_BASE_ADDR),
             "socket" => &socket_path,
+        );
+        Ok(None)
+    }
+
+    /// Managed TPM path: restore swtpm state from a Crucible volume, spawn
+    /// swtpm as a child process, attach the CRB device, and return a
+    /// [`TpmStatePersister`] that saves state back to Crucible on VM halt.
+    async fn initialize_tpm_with_state_disk(
+        &mut self,
+        state_disk: &crate::spec::TpmStateDisk,
+        swtpm_binary: &std::path::Path,
+    ) -> Result<TpmStatePersister, MachineInitError> {
+        use propolis::block::CrucibleBackend;
+
+        const TPM_STATE_DIR: &str = "/tmp/swtpm-state";
+        const TPM_SOCK: &str = "/tmp/swtpm.sock";
+        const TPM_CTRL: &str = "/tmp/swtpm.ctrl";
+
+        let state_dir = std::path::PathBuf::from(TPM_STATE_DIR);
+
+        // Open the Crucible state volume.
+        let vcr: VolumeConstructionRequest =
+            serde_json::from_str(&state_disk.spec.request_json)
+                .map_err(MachineInitError::VcrDeserializationFailed)?;
+        let crucible_backend = CrucibleBackend::open_for_raw_io(
+            vcr,
+            self.log.new(slog::o!("component" => "tpm-state-disk")),
+        )
+        .await
+        .with_context(|| "failed to open TPM state Crucible volume")?;
+
+        // Restore permall from Crucible to the state dir.
+        self.restore_tpm_state_from_crucible(&crucible_backend, &state_dir)
+            .await?;
+
+        // Remove stale sockets so swtpm can re-bind.
+        let _ = std::fs::remove_file(TPM_SOCK);
+        let _ = std::fs::remove_file(TPM_CTRL);
+
+        // Spawn swtpm as a child process (no --daemon so we keep the handle).
+        let child = tokio::process::Command::new(swtpm_binary)
+            .args([
+                "socket",
+                "--tpm2",
+                "--tpmstate",
+                &format!("dir={TPM_STATE_DIR}"),
+                "--ctrl",
+                &format!("type=unixio,path={TPM_CTRL}"),
+                "--server",
+                &format!("type=unixio,path={TPM_SOCK}"),
+                "--flags",
+                "not-need-init",
+            ])
+            .env(
+                "LD_LIBRARY_PATH",
+                "/opt/oxide/propolis-server/lib",
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| {
+                format!("failed to spawn swtpm at {}", swtpm_binary.display())
+            })?;
+
+        // Wait for swtpm's server socket to appear (up to 5 s).
+        let sock_path = std::path::Path::new(TPM_SOCK);
+        let mut waited = std::time::Duration::ZERO;
+        while !sock_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            waited += std::time::Duration::from_millis(100);
+            if waited >= std::time::Duration::from_secs(5) {
+                return Err(MachineInitError::GenericError(anyhow::anyhow!(
+                    "timed out waiting for swtpm socket at {TPM_SOCK}"
+                )));
+            }
+        }
+        info!(self.log, "swtpm started"; "socket" => TPM_SOCK);
+
+        // Attach the CRB device.
+        let tpm_id =
+            SpecKey::Name("tpm0".to_string());
+        let swtpm_backend = Arc::new(SwtpmBackend::new(TPM_SOCK));
+        let device = TpmCrb::create(swtpm_backend);
+        device.attach(&self.machine.bus_mmio);
+        self.devices.insert(tpm_id, device);
+        info!(self.log, "TPM CRB device attached (managed swtpm)";
+            "mmio_base" => format!("{:#x}", propolis::hw::tpm::TPM_CRB_BASE_ADDR),
+            "socket" => TPM_SOCK,
+        );
+
+        Ok(TpmStatePersister {
+            backend: crucible_backend,
+            state_dir,
+            child: tokio::sync::Mutex::new(child),
+            log: self.log.new(slog::o!("component" => "tpm-state-persister")),
+        })
+    }
+
+    /// Read the TPM state blob from a Crucible volume and, if valid, write the
+    /// permall file into `state_dir` so swtpm can restore from it.
+    async fn restore_tpm_state_from_crucible(
+        &self,
+        backend: &propolis::block::CrucibleBackend,
+        state_dir: &std::path::Path,
+    ) -> Result<(), MachineInitError> {
+        const MAGIC: &[u8; 8] = b"TPMST\x00\x01\x00";
+        const HEADER_LEN: usize = 16;
+        // Read enough for a reasonable max state size (256 KiB).
+        const MAX_STATE: usize = 256 * 1024;
+
+        let raw = backend
+            .read_raw(HEADER_LEN + MAX_STATE)
+            .await
+            .with_context(|| "failed to read TPM state from Crucible")?;
+
+        if raw.len() < HEADER_LEN || &raw[..8] != MAGIC {
+            info!(self.log, "No valid TPM state in Crucible, starting fresh");
+            return Ok(());
+        }
+
+        let len = u64::from_le_bytes(
+            raw[8..16].try_into().expect("slice is exactly 8 bytes"),
+        ) as usize;
+
+        if len == 0 || HEADER_LEN + len > raw.len() {
+            info!(
+                self.log,
+                "TPM state header invalid (len={}), starting fresh", len
+            );
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(state_dir)
+            .with_context(|| "create swtpm state dir")?;
+        let permall_path = state_dir.join("tpm2-00.permall");
+        std::fs::write(&permall_path, &raw[HEADER_LEN..HEADER_LEN + len])
+            .with_context(|| "write TPM permall to tmpfs")?;
+
+        info!(
+            self.log,
+            "Restored {} bytes of TPM state from Crucible", len
         );
         Ok(())
     }

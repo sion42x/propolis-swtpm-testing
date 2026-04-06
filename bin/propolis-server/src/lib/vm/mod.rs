@@ -313,6 +313,11 @@ pub(super) struct EnsureOptions {
     /// If set, inject a CRB TPM backed by this swtpm socket path into every
     /// instance, regardless of what the instance spec says. Demo/sled use only.
     pub(super) tpm_socket: Option<std::path::PathBuf>,
+
+    /// Path to the swtpm binary. When set alongside a TpmStateDisk in the
+    /// instance spec, propolis-server manages swtpm as a child process and
+    /// persists its state to the Crucible-backed state disk (demo use).
+    pub(super) swtpm_binary: Option<std::path::PathBuf>,
 }
 
 impl Vm {

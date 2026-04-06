@@ -363,6 +363,99 @@ impl CrucibleBackend {
     pub async fn volume_is_active(&self) -> Result<bool, CrucibleError> {
         self.state.volume.query_is_active().await
     }
+
+    /// Construct and activate a Crucible volume for direct host-side raw I/O
+    /// (e.g. TPM state persistence). Unlike [`create`], this does not start
+    /// guest block I/O worker threads; use [`read_raw`]/[`write_raw`] instead.
+    ///
+    /// [`create`]: CrucibleBackend::create
+    /// [`read_raw`]: CrucibleBackend::read_raw
+    /// [`write_raw`]: CrucibleBackend::write_raw
+    pub async fn open_for_raw_io(
+        request: VolumeConstructionRequest,
+        log: slog::Logger,
+    ) -> io::Result<Arc<Self>> {
+        let volume = Volume::construct(request, None, log)
+            .await
+            .map_err(|e| io::Error::from(CrucibleError::from(e)))?;
+        volume.activate().await.map_err(io::Error::from)?;
+        let block_size = volume.get_block_size().await?;
+        let total_size = volume.total_size().await?;
+        let sectors = total_size / block_size;
+        let info = block::DeviceInfo {
+            block_size: block_size as u32,
+            total_size: sectors,
+            read_only: false,
+            supports_discard: false,
+        };
+        Ok(Arc::new(Self {
+            block_attach: block::BackendAttachment::new(WORKER_COUNT, info),
+            state: Arc::new(WorkerState { volume, info, skip_flush: false }),
+            workers: TaskGroup::new(),
+        }))
+    }
+
+    /// Read `len` bytes from offset 0 of the volume. Internally rounds up to
+    /// the block boundary; the returned `Vec` is truncated to exactly `len`.
+    ///
+    /// The volume must have been activated before calling this (e.g. via
+    /// [`open_for_raw_io`] or [`start`]).
+    ///
+    /// [`open_for_raw_io`]: CrucibleBackend::open_for_raw_io
+    /// [`start`]: block::Backend::start
+    pub async fn read_raw(&self, len: usize) -> io::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(vec![]);
+        }
+        let bs = self.state.info.block_size as usize;
+        let n_blocks = len.div_ceil(bs);
+        let total = n_blocks * bs;
+        let mut buf = Buffer::new(n_blocks, bs);
+        self.state
+            .volume
+            .read(crucible::BlockIndex(0), &mut buf)
+            .await
+            .map_err(io::Error::from)?;
+        let mut out = buf[0..total].to_vec();
+        out.truncate(len);
+        Ok(out)
+    }
+
+    /// Write `data` to offset 0 of the volume (zero-padded to the block
+    /// boundary) and flush.
+    ///
+    /// The volume must have been activated before calling this (e.g. via
+    /// [`open_for_raw_io`] or [`start`]).
+    ///
+    /// [`open_for_raw_io`]: CrucibleBackend::open_for_raw_io
+    /// [`start`]: block::Backend::start
+    pub async fn write_raw(&self, data: &[u8]) -> io::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let bs = self.state.info.block_size as usize;
+        let n_blocks = data.len().div_ceil(bs);
+        let total = n_blocks * bs;
+        let mut buf = crucible::BytesMut::with_capacity(total);
+        {
+            let spare = buf.spare_capacity_mut();
+            for (i, &b) in data.iter().enumerate() {
+                spare[i].write(b);
+            }
+            for slot in spare[data.len()..total].iter_mut() {
+                slot.write(0u8);
+            }
+        }
+        // SAFETY: all `total` bytes were initialized in the block above.
+        unsafe { buf.set_len(total) };
+        self.state
+            .volume
+            .write(crucible::BlockIndex(0), buf)
+            .await
+            .map_err(io::Error::from)?;
+        self.state.volume.flush(None).await.map_err(io::Error::from)?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
