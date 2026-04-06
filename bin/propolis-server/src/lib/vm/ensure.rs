@@ -482,11 +482,46 @@ impl VmEnsureActive<'_> {
 
 async fn initialize_vm_objects(
     log: slog::Logger,
-    spec: Spec,
+    mut spec: Spec,
     properties: InstanceProperties,
     options: Arc<EnsureOptions>,
     event_queue: Arc<InputQueue>,
 ) -> anyhow::Result<InputVmObjects> {
+    // If --swtpm-binary is set, check for a disk whose NVMe serial number
+    // starts with "tpm-" (by convention, a disk the user named "tpm-*" in
+    // Nexus). If found, claim it as the TPM state disk and remove it from
+    // the guest-visible disk list so Windows never sees it.
+    if options.swtpm_binary.is_some() && spec.tpm_state_disk.is_none() {
+        use crate::spec::{StorageBackend, StorageDevice, TpmStateDisk};
+        use propolis_api_types::instance_spec::components::devices::TpmStateDisk as TpmStateDiskDesc;
+
+        let tpm_key = spec
+            .disks
+            .iter()
+            .find(|(_, disk)| {
+                if let StorageDevice::Nvme(nvme) = &disk.device_spec {
+                    nvme.serial_number.starts_with(b"tpm-")
+                } else {
+                    false
+                }
+            })
+            .map(|(k, _)| k.clone());
+
+        if let Some(key) = tpm_key {
+            let disk = spec.disks.remove(&key).unwrap();
+            if let StorageBackend::Crucible(crucible_be) = disk.backend_spec {
+                info!(log, "claiming disk as TPM state disk";
+                    "disk_id" => %key);
+                spec.tpm_state_disk = Some(TpmStateDisk {
+                    id: key,
+                    spec: TpmStateDiskDesc {
+                        request_json: crucible_be.request_json,
+                    },
+                });
+            }
+        }
+    }
+
     info!(log, "initializing new VM";
               "spec" => #?spec,
               "properties" => #?properties,
