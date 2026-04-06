@@ -599,12 +599,21 @@ async fn initialize_vm_objects(
     ))?;
     init.initialize_network_devices(&chipset).await?;
     init.initialize_vsock(&chipset)?;
-    let tpm_state = init
+    let tpm_state = match init
         .initialize_tpm_crb(
             options.tpm_socket.as_deref(),
             options.swtpm_binary.as_deref(),
         )
-        .await?;
+        .await
+    {
+        Ok(state) => state,
+        Err(e) => {
+            slog::warn!(log,
+                "TPM initialization failed, continuing without TPM";
+                "error" => %e);
+            None
+        }
+    };
 
     #[cfg(feature = "failure-injection")]
     init.initialize_test_devices();
