@@ -1,12 +1,16 @@
 # vTPM Demo: BitLocker-Encrypted Windows VM on illumos
 
 This guide walks through running a Windows Server 2022 VM with a software TPM
-(swtpm) and BitLocker encryption on an illumos host using either
-`propolis-server` (recommended) or `propolis-standalone`.
+(swtpm) and BitLocker encryption. Two deployment paths are covered:
 
-The result: a Windows VM whose disk is BitLocker-encrypted, where the TPM key
-material lives in the swtpm state directory. Lose the state dir → BitLocker
-recovery screen. Restore it → boots normally.
+1. **Local helios box** — using `propolis-standalone` or `propolis-server`
+   directly; TPM state lives in a local directory.
+2. **Oxide rack (r19+)** — using `propolis-server` managed by sled-agent/Nexus;
+   TPM state persists across stop/start in a Crucible volume. No recovery key
+   prompt, no manual intervention.
+
+The result: a Windows VM whose disk is BitLocker-encrypted and whose TPM key
+material survives VM stop/start automatically.
 
 ## Architecture
 
@@ -16,14 +20,20 @@ Windows guest
         └── CRB MMIO at 0xFED40000
               └── propolis TpmCrb device model
                     └── SwtpmBackend (Unix socket)
-                          └── swtpm process (/tmp/mytpm.sock)
-                                └── swtpm state dir (/tmp/mytpm/)  ← the "key"
+                          └── swtpm process (/tmp/swtpm.sock)
+                                └── swtpm state dir (/tmp/swtpm-state/)  ← the "key"
+                                      └── [on Oxide rack] Crucible volume (tpm-* disk)
 ```
 
 OVMF firmware provides two ACPI tables that Windows requires:
 - `TPM2` table (StartMethod=7 CRB, ControlArea=0xFED40040) — tells tpmci.sys
   where and how to talk to the TPM
 - `SSDT` with an `MSFT0101` device node — triggers Windows to load tpmci.sys
+
+On a local helios box, the swtpm state directory is a plain filesystem path that
+must be preserved manually between restarts. On an Oxide rack, propolis-server
+manages swtpm as a child process and automatically saves/restores the state to a
+dedicated Crucible volume on every VM stop/start.
 
 ## Prerequisites
 
@@ -319,3 +329,127 @@ that are from Windows tpmci.sys.
 **0 CRB entries in propolis log after boot**
 → OVMF did not detect the CRB interface. Check that INTF_ID_LO reports
    CapCRB (bit 14) set. Value should be 0x00024011.
+
+---
+
+## Oxide rack deployment (r19+)
+
+This path requires a propolis-server build that includes the Crucible-backed TPM
+state persistence changes (see `vtpm-changes.md`) and an swtpm binary bundled
+into the propolis-server tarball.
+
+### Prerequisites
+
+- propolis-server with TPM changes built and repacked to the sleds
+- `swtpm` binary at `/opt/oxide/propolis-server/bin/swtpm` inside the zone
+- A Nexus project with a Windows Server 2022 instance
+
+### 1. Create a TPM state disk
+
+In Nexus (via the CLI or web console), create a small disk named with a `tpm-`
+prefix and attach it to the instance **at creation time**:
+
+```bash
+oxide --insecure disk create --project <project> \
+  --name tpm-<instance> --size 1GiB --disk-source blank=4096
+
+# Then attach at instance creation time, or include it in the instance spec.
+# The disk must be attached before the instance is first started.
+```
+
+The name `tpm-<anything>` is the only requirement. propolis-server detects it by
+NVMe serial number prefix and intercepts it automatically — Windows never sees
+the disk.
+
+### 2. Start the instance
+
+Start the instance normally via Nexus. propolis-server will:
+1. Find the `tpm-*` disk in the spec and remove it from the guest device list
+2. Activate the Crucible volume for direct I/O
+3. Restore prior swtpm state if present (first boot: starts fresh)
+4. Spawn swtpm as a managed child process
+5. Attach the CRB device to the guest MMIO bus
+
+### 3. Verify TPM presence
+
+From an elevated PowerShell prompt inside the VM:
+
+```powershell
+Get-Tpm
+# TpmPresent, TpmReady, TpmEnabled, TpmActivated should all be True
+# ManufacturerIdTxt: IBM  (swtpm identifies as IBM)
+```
+
+### 4. Install BitLocker and encrypt
+
+```powershell
+Install-WindowsFeature BitLocker -IncludeAllSubFeature -IncludeManagementTools -Restart
+```
+
+After the VM reboots, encrypt using the WMI path (the PowerShell cmdlet requires
+the TBS service, which is absent on Windows Server 2022):
+
+```powershell
+$vol = Get-WmiObject -Namespace root\cimv2\Security\MicrosoftVolumeEncryption `
+  -Class Win32_EncryptableVolume -Filter "DriveLetter = 'C:'"
+$r = $vol.ProtectKeyWithTPM("TPM", [byte[]]@())
+$r2 = $vol.Encrypt(6, 0)
+
+while ($true) {
+    $v = Get-BitLockerVolume C:
+    Write-Host "$($v.VolumeStatus) - $($v.EncryptionPercentage)%"
+    if ($v.VolumeStatus -eq 'FullyEncrypted') { break }
+    Start-Sleep 5
+}
+```
+
+### 5. Stop and start — automatic unseal
+
+Stop the instance via Nexus. propolis-server will kill swtpm, read
+`tpm2-00.permall` from `/tmp/swtpm-state/`, and write it to the Crucible volume
+with a magic header before the zone is torn down.
+
+Start the instance again. propolis-server restores the permall file before
+spawning swtpm. By the time the guest's CRB driver initializes, the SRK is
+already present. Windows boots straight to the desktop — no BitLocker recovery
+key prompt.
+
+### Confirming state was saved and restored
+
+From the propolis zone (while the instance is running):
+
+```bash
+# Confirm swtpm is managed by propolis-server
+pgrep -fl swtpm
+
+# Confirm state dir has the permall file
+ls -la /tmp/swtpm-state/
+
+# Check propolis log for TPM lifecycle messages
+grep -i "tpm\|swtpm" /var/svc/log/system-illumos-propolis-server:default.log
+```
+
+Expected log messages on start:
+- `"claiming disk as TPM state disk"` — disk interception fired
+- `"No valid TPM state in Crucible, starting fresh"` (first boot only)
+- `"swtpm started"` — socket appeared within 5 seconds
+- `"TPM CRB device attached (managed swtpm)"`
+
+Expected log message on stop:
+- `"saving TPM state to Crucible"`
+
+### Verifying the security model (Oxide rack)
+
+To demonstrate that the Crucible volume is the actual key material, stop the
+instance, delete and recreate the `tpm-*` disk (wiping its contents), then start
+the instance. BitLocker will show the recovery key screen — the SRK is gone.
+Restore from the original volume and it boots normally.
+
+### Notes
+
+- The `tpm-*` disk naming convention is a demo hack. A production implementation
+  would have Nexus provision the TPM state volume automatically and pass it to
+  sled-agent as a first-class part of the instance spec.
+- No sled-agent or Nexus changes are required for this demo path.
+- TPM initialization is non-fatal: if the Crucible volume fails to activate or
+  swtpm times out, the VM starts without a TPM rather than failing entirely.

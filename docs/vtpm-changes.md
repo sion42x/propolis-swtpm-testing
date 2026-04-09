@@ -80,6 +80,117 @@ Calls `initialize_tpm_crb()` during instance initialization, after vsock.
 
 ---
 
+## Control plane integration (Oxide rack, r19)
+
+The changes above were sufficient to prove the concept on `propolis-standalone`.
+The following additional work was done to make vTPM operational on a real Oxide
+racklet running rack software r19, using `propolis-server` and Nexus-provisioned
+instances.
+
+### TPM state persistence via Crucible
+
+**`lib/propolis/src/block/crucible.rs`**
+Added three new methods to `CrucibleBackend` for direct host-side I/O, bypassing
+the guest block stack:
+- `open_for_raw_io()` — activates a Crucible volume and returns a backend
+  suitable for direct reads/writes (not attached to any guest device)
+- `read_raw(len)` — reads block-aligned bytes from offset 0
+- `write_raw(data)` — writes block-aligned bytes to offset 0, then flushes
+
+**`bin/propolis-server/src/lib/initializer.rs`**
+Added `TpmStatePersister` struct, held alive in `VmObjects` for the duration of
+the VM's life. On `save()`:
+1. Kills the swtpm child process (swtpm flushes `tpm2-00.permall` on every
+   command completion, so the file is current at kill time)
+2. Reads `tpm2-00.permall` from the state directory
+3. Writes it to the Crucible volume with the wire format:
+   `TPMST\x00\x01\x00` (8-byte magic) + u64 LE length + raw permall bytes
+
+Added `initialize_tpm_with_state_disk()`: activates the Crucible volume,
+restores prior state if the magic header is present (fresh disk is handled
+gracefully — starts swtpm with an empty state dir), creates the state directory,
+removes stale sockets, spawns swtpm as a managed child process (no `--daemon`),
+waits up to 5 seconds for the Unix socket to appear, then attaches the CRB device.
+
+Added `restore_tpm_state_from_crucible()`: reads the blob, validates the magic
+header, extracts the permall bytes, and writes them to the state directory so
+swtpm can restore from them on startup.
+
+**`bin/propolis-server/src/lib/vm/objects.rs`**
+Added `tpm_state: Option<TpmStatePersister>` to `InputVmObjects` and
+`VmObjectsLocked`. `halt_devices()` calls `tpm_state.save().await` before
+tearing down other devices.
+
+### TpmStateDisk spec type
+
+**`crates/propolis-api-types-versions/src/add_vsock/components/devices.rs`**
+Added `TpmStateDisk { request_json: String }` — carries the Crucible VCR for
+the TPM state volume.
+
+**`crates/propolis-api-types-versions/src/add_vsock/instance_spec.rs`**
+Added `Component::TpmStateDisk(TpmStateDisk)` variant.
+
+**`bin/propolis-server/src/lib/spec/mod.rs`**
+Added internal `TpmStateDisk { id, spec }` struct and `tpm_state_disk:
+Option<TpmStateDisk>` field to `Spec`.
+
+**`bin/propolis-server/src/lib/spec/builder.rs`**
+Added `TpmStateDiskInUse` error variant and `add_tpm_state_disk()` method.
+
+**`bin/propolis-server/src/lib/spec/api_spec_v0.rs`**
+Added `tpm_state_disk: _` to the exhaustive `Spec` destructure (no v0
+representation; the disk is intercepted before the guest sees it).
+
+### Disk interception by NVMe serial number
+
+**`bin/propolis-server/src/lib/vm/ensure.rs`**
+At the top of `initialize_vm_objects()`, if `--swtpm-binary` is set and no
+`tpm_state_disk` is already in the spec, the code searches `spec.disks` for an
+NVMe disk whose serial number starts with `b"tpm-"`. If found:
+- The disk is removed from `spec.disks` (Windows never enumerates it)
+- Its Crucible VCR is moved into `spec.tpm_state_disk`
+
+This relies on the convention that a disk named `tpm-*` in Nexus gets an NVMe
+serial equal to its name (padded to 20 bytes by sled-agent). No sled-agent
+changes are required.
+
+TPM initialization is non-fatal: if anything fails (Crucible activation error,
+swtpm timeout, etc.), a warning is logged and the VM continues without a TPM
+rather than failing the entire ensure.
+
+### `--swtpm-binary` CLI argument
+
+**`bin/propolis-server/src/main.rs`**
+Added `--swtpm-binary <PATH>` to the `run` subcommand.
+
+**`bin/propolis-server/src/lib/server.rs`**
+Added `swtpm_binary: Option<PathBuf>` to `StaticConfig` and threaded it through
+`DropshotEndpointContext` and `EnsureOptions`.
+
+**`bin/propolis-server/src/lib/vm/mod.rs`**
+Added `swtpm_binary: Option<PathBuf>` to `EnsureOptions`.
+
+### `packaging/smf/method_script.sh`
+If `/opt/oxide/propolis-server/bin/swtpm` exists and is executable, passes
+`--swtpm-binary` to propolis-server and sets `LD_LIBRARY_PATH` for swtpm's
+shared libraries. No changes to sled-agent or Nexus required.
+
+### Deployment
+
+The swtpm binary and its libraries are bundled into the propolis-server tarball
+at repack time alongside the propolis-server binary and OVMF firmware. The
+customer creates a 1 GiB disk in Nexus named `tpm-<anything>`, attaches it to
+the instance at creation time, and propolis-server handles everything else.
+
+### Verified on
+
+- Oxide racklet running rack software **r19**
+- Windows Server 2022 guest (16 vCPU, 64 GiB)
+- `Get-Tpm`: TpmPresent/Ready/Enabled/Activated all True (ManufacturerIdTxt: IBM / swtpm)
+- BitLocker full-volume encryption + automatic unseal across Nexus stop/start
+
+---
+
 ## oxide-edk2 (OvmfPkg)
 
 ### `OvmfPkg/AcpiTables/Tpm2.aslc` (new file)
